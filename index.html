@@ -1,0 +1,988 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>3D Model Viewer</title>
+    <style>
+        body { 
+            margin: 0; 
+            background-color: #333333;
+        }
+        #info { 
+            position: fixed; 
+            top: 10px; 
+            left: 10px; 
+            color: white; 
+            background: rgba(0,0,0,0.7);
+            padding: 10px;
+            font-family: Arial, sans-serif;
+            white-space: pre-line;
+            z-index: 100;
+        }
+        #loading {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: white;
+            background: rgba(0,0,0,0.8);
+            padding: 20px;
+            border-radius: 5px;
+            font-family: Arial, sans-serif;
+            z-index: 100;
+        }
+    </style>
+</head>
+<body>
+    <div id="info">初始化中...</div>
+    <div id="loading">加载模型中...</div>
+
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.157.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.157.0/examples/jsm/"
+        }
+    }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
+        import { MTLLoader } from 'three/addons/loaders/MTLLoader.js';
+        import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
+
+        const info = document.getElementById('info');
+        const loading = document.getElementById('loading');
+        let scene, camera, renderer, controls;
+        let raycaster, mouse;
+        let labelRenderer;
+        let labels = [];
+        let buildingInfo = new Map();  // 添加这行
+        let buildingLabel = null;      // 也添加这个用于显示标签
+
+        // 模型配置
+        const modelPieces = [
+            { 
+                obj: 'piece1.obj', 
+                mtl: 'piece1.mtl',
+                texturePath: 'models/'
+            },
+            { 
+                obj: 'piece2.obj', 
+                mtl: 'piece2.mtl',
+                texturePath: 'models/'
+            },
+            { 
+                obj: 'piece3.obj', 
+                mtl: 'piece3.mtl',
+                texturePath: 'models/'
+            },
+            { 
+                obj: 'piece4.obj', 
+                mtl: 'piece4.mtl',
+                texturePath: 'models/'
+            }
+        ];
+
+        let loadedCount = 0;
+        let loadedTextures = 0;
+        let totalTextures = 0;
+        let loadingErrors = [];
+        let loadedTextureUrls = new Set();
+        let expectedTextureUrls = new Set();
+
+        // 首先定义所有辅助函数
+        function updateLoadingProgress() {
+            const modelProgress = (loadedCount / modelPieces.length) * 50;
+        // 防止除以零的情况
+            const textureProgress = totalTextures > 0 ? 
+                (loadedTextures / totalTextures) * 50 : 50;
+            const totalProgress = modelProgress + textureProgress;
+        
+            loading.textContent = `加载进度: ${Math.round(totalProgress)}%\n` +
+                            `模型: ${loadedCount}/${modelPieces.length}\n` +
+                            `纹理: ${loadedTextures}/${totalTextures || '未检测到'}\n` +
+                            (loadingErrors.length > 0 ? `\n错误:\n${loadingErrors.join('\n')}` : '');
+                                
+            console.log(`更新加载进度 - 模型: ${loadedCount}/${modelPieces.length}, 纹理: ${loadedTextures}/${totalTextures || '未检测到'}`);
+        }
+
+        function checkAllLoaded() {
+            console.log('检查加载状态:', {
+                models: `${loadedCount}/${modelPieces.length}`,
+                textures: `${loadedTextures}/${totalTextures}`,
+                expectedTextures: Array.from(expectedTextureUrls),
+                loadedTextures: Array.from(loadedTextureUrls)
+            });
+            
+            if (loadedCount === modelPieces.length && loadedTextures === totalTextures) {
+                console.log('所有内容加载完成');
+                onAllModelsLoaded();
+            }
+        }
+
+        function onAllModelsLoaded() {
+            console.log('设置场景...');
+            
+            const buildingCoords1 = [
+                // 这里填入你的8个点坐标
+                {x: 1, y: -70, z: -96},     // 示例坐标，请替换为实际坐标
+                {x: 34.41, y: -70, z: -101.19},
+                {x: 40.18, y: -70, z: -67.85},
+                {x: 7, y: -70, z: -62.43},
+                {x: 1, y: -19.85, z: -96},
+                {x: 34.41, y: -19.85, z: -101.19},
+                {x: 40.18, y: -19.85, z: -67.85},
+                {x: 7, y: -19.85, z: -62.43}
+            ];
+            const buildingName1 = "交通学院新楼";
+            addBuildingMarker(buildingCoords1, buildingName1);
+
+            const buildingCoords2 = [
+                // 这里填入你的8个点坐标
+                {x: -1, y: -70, z: -16},     // 示例坐标，请替换为实际坐标
+                {x: 14.1, y: -70, z: -18.7},
+                {x: 22.3, y: -70, z: 25.34},
+                {x: 7.44, y: -70, z: 27.93},
+                {x: -1, y: -53.8, z: -16},
+                {x: 14.1, y: -53.8, z: -18.7},
+                {x: 22.3, y: -53.8, z: 25.34},
+                {x: 7.2, y: -53.8, z: 28.1}
+            ];
+            const buildingName2 = "成和楼";
+            addBuildingMarker(buildingCoords2, buildingName2);
+
+              // T字形建筑 - 横向部分
+            const buildingCoordsT1 = [
+                // 这里填入T字主体部分的8个顶点坐标
+                {x: 37.88, y: -70, z: -88.3},  // 示例坐标，需要替换为实际坐标
+                {x: 90.5, y: -70, z: -98.02},
+                {x: 93.27, y: -70, z: -83.44},
+                {x: 40.51, y: -70, z: -73.84},
+                {x: 37.88, y: -50.25, z: -88.3},
+                {x: 90.5, y: -50.25, z: -98.02},
+                {x: 93.27, y: -50.25, z: -83.44},
+                {x: 40.51, y: -50.25, z: -73.84}
+            ];
+            
+            // T字形建筑 - 主体部分
+            const buildingCoordsT2 = [
+                // 这里填入T字横向部分的8个顶点坐标
+                {x: 50, y: -70, z: -124.77},  // 示例坐标，需要替换为实际坐标
+                {x: 64.63, y: -70, z: -126.55},
+                {x: 70, y: -70, z: -94.17},
+                {x: 55.5, y: -70, z: -91.67},
+                {x: 50, y: -50.25, z: -124.77},
+                {x: 64.63, y: -50.25, z: -126.55},
+                {x: 70, y: -50.25, z: -94.17},
+                {x: 55.5, y: -50.25, z: -91.67}
+            ];
+
+            // 将两个部分作为同一个建筑物添加
+            const buildingName = "交通学院老楼";
+            const box1 = addBuildingMarker(buildingCoordsT1, buildingName);
+            const box2 = addBuildingMarker(buildingCoordsT2, buildingName);
+
+            // 将两个部分关联起来（当悬停在任一部分时都会高亮整个建筑）
+            buildingInfo.set(box1.uuid, {
+                name: buildingName,
+                object: box1,
+                originalColor: box1.material.color.clone(),
+                originalOpacity: box1.material.opacity,
+                relatedParts: [box2]
+            });
+
+            buildingInfo.set(box2.uuid, {
+                name: buildingName,
+                object: box2,
+                originalColor: box2.material.color.clone(),
+                originalOpacity: box2.material.opacity,
+                relatedParts: [box1]
+            });
+
+            const floorCoords = [
+                // 在这里填入你的8个顶点坐标
+                {x: -1, y: -62, z: -16.5},     
+                {x: 14.3, y: -62, z: -19},
+                {x: 22.7, y: -62, z: 25.8},
+                {x: 7, y: -62, z: 28.3},
+                {x: -1, y: -58, z: -16.5},
+                {x: 14.3, y: -58, z: -19},
+                {x: 22.7, y: -58, z: 25.8},
+                {x: 7, y: -58, z: 28.3}
+            ];
+            
+            // 添加标记
+            const floorBox = addBuildingMarker(floorCoords, "成和楼三楼");
+            // 添加模型信息
+            buildingInfo.set(floorBox.uuid, {
+                name: "成和楼三楼",
+                object: floorBox,
+                originalColor: floorBox.material.color.clone(),
+                originalOpacity: floorBox.material.opacity,
+                hasFloorModel: true,
+                floorModelPath: 'models/chenghe_3rd.obj',
+                floorMaterialPath: 'models/chenghe_3rd.mtl',
+                texturePath: 'models/textured_output.jpg',  // 添加纹理路径
+                subModels: [
+                    {
+                        name: "302",
+                        coords: [
+                            // 这个区域的8个顶点坐标
+                            {x: -17.5, y: -1.2, z: 0.42},  // 示例坐标，需要替换
+                            {x: -16.54, y: -1.2, z: 0.28},
+                            {x: -16.54, y: -1.2, z: 0.48},
+                            {x: -17.5, y: -1.2, z: 0.64},
+                            {x: -17.5, y: 1.12, z: 0.42},
+                            {x: -16.54, y: 1.12, z: 0.28},
+                            {x: -16.54, y: 1.12, z: 0.48},
+                            {x: -17.5, y: 1.12, z: 0.64}
+                        ],
+                        modelPath: 'models/302.obj',
+                        materialPath: 'models/302.mtl',
+                        texturePath: 'models/textured_output1.jpg'  // 子模型的纹理路径
+                    }
+                ]
+            });
+
+            // 检查场景中的对象
+            console.log('场景中的对象:', scene.children.map(child => ({
+                type: child.type,
+                name: child.name,
+                position: child.position,
+                visible: child.visible
+            })));
+
+            // 确保有可见的物体
+            const visibleObjects = scene.children.filter(child => 
+                child.type === 'Mesh' || child.type === 'Group'
+            );
+            
+            if (visibleObjects.length === 0) {
+                console.error('场景中没有可见的模型!');
+                loading.textContent = '错误: 场景中没有可见的模型';
+                return;
+            }
+
+            // 旋转所有模型90度 
+            visibleObjects.forEach(object => {
+                object.rotation.x = -Math.PI / 2; // 绕X轴旋转-90度
+            });
+
+            loading.style.display = 'none';
+            // 在 onAllModelsLoaded 函数中更新提示信息
+            info.textContent = '模型加载完成\n使用鼠标操作：\n- 左键：旋转\n- 右键：平移\n- 滚轮：缩放\n- Ctrl+左键：添加坐标标签\n- 点击标签上的 × 删除单个标签\n- 使用右下角按钮清除所有标签';
+
+            // 调整相机位置
+            const box = new THREE.Box3().setFromObject(scene);
+            const center = box.getCenter(new THREE.Vector3());
+            const size = box.getSize(new THREE.Vector3());
+            
+            console.log('模型尺寸:', {
+                center: center.toArray(),
+                size: size.toArray()
+            });
+            
+            const maxDim = Math.max(size.x, size.y, size.z);
+            const fov = camera.fov * (Math.PI / 180);
+            let cameraZ = Math.abs(maxDim / 2 / Math.tan(fov / 2));
+            cameraZ *= 1.5;
+            
+            camera.position.set(center.x, center.y, center.z + cameraZ);
+            camera.lookAt(center);
+            controls.target.copy(center);
+            controls.update();
+            
+            console.log('相机设置:', {
+                position: camera.position.toArray(),
+                target: controls.target.toArray(),
+                distance: cameraZ
+            });
+        }
+
+        function addLights() {
+            console.log('添加光源');
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+            scene.add(ambientLight);
+
+            const mainLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            mainLight.position.set(10, 10, 10);
+            scene.add(mainLight);
+
+            const fillLight = new THREE.DirectionalLight(0xffffff, 0.3);
+            fillLight.position.set(-10, 5, -10);
+            scene.add(fillLight);
+        }
+
+        function loadModels() {
+        info.textContent = '开始加载模型...';
+        console.log('开始加载模型');
+        
+        // 初始化纹理计数器
+        totalTextures = 0;
+        loadedTextures = 0;
+        
+        modelPieces.forEach((piece, index) => {
+            const mtlLoader = new MTLLoader();
+            mtlLoader.setPath(piece.texturePath);
+            
+            info.textContent = `正在加载材质文件: ${piece.mtl}`;
+            console.log(`加载材质: ${piece.mtl}`);
+            
+            mtlLoader.load(
+                piece.mtl,
+                (materials) => {
+                    console.log(`材质加载成功: ${piece.mtl}`);
+                    materials.preload();
+                    
+                    // 收集所有纹理URL并更新计数
+                    Object.values(materials.materials).forEach(material => {
+                        if (material.map) {
+                            const textureUrl = material.map.source?.data?.src;
+                            if (textureUrl) {
+                                expectedTextureUrls.add(textureUrl);
+                                totalTextures = expectedTextureUrls.size;
+                                console.log(`发现纹理: ${textureUrl}`);
+                                
+                                material.map.addEventListener('load', () => {
+                                    loadedTextureUrls.add(textureUrl);
+                                    loadedTextures = loadedTextureUrls.size;
+                                    console.log(`纹理加载成功: ${textureUrl}`);
+                                    console.log(`已加载纹理: ${loadedTextures}/${totalTextures}`);
+                                    updateLoadingProgress();
+                                    checkAllLoaded();
+                                });
+                            }
+                        }
+                    });
+                        
+                        const objLoader = new OBJLoader();
+                        objLoader.setMaterials(materials);
+                        objLoader.setPath(piece.texturePath);
+                        
+                        console.log(`开始加载模型: ${piece.obj}`);
+                        
+                        objLoader.load(
+                            piece.obj,
+                            (object) => {
+                                console.log(`模型加载成功: ${piece.obj}`);
+                                scene.add(object);
+                                loadedCount++;
+                                updateLoadingProgress();
+                                checkAllLoaded();
+                                
+                                // 打印模型信息
+                                console.log('模型信息:', {
+                                    name: object.name,
+                                    children: object.children.length,
+                                    position: object.position,
+                                    materials: object.children.map(child => 
+                                        child.material ? {
+                                            type: child.material.type,
+                                            hasMap: !!child.material.map,
+                                            mapUrl: child.material.map?.source?.data?.src
+                                        } : 'no material'
+                                    )
+                                });
+                            },
+                            (xhr) => {
+                                const progress = (xhr.loaded / xhr.total * 100);
+                                console.log(`${piece.obj}: ${progress.toFixed(2)}% loaded`);
+                            },
+                            (error) => {
+                                console.error(`Error loading ${piece.obj}:`, error);
+                                loadingErrors.push(`模型加载错误 ${piece.obj}: ${error.message}`);
+                                updateLoadingProgress();
+                            }
+                        );
+                    },
+                    (xhr) => {
+                        const progress = (xhr.loaded / xhr.total * 100);
+                        console.log(`${piece.mtl}: ${progress.toFixed(2)}% loaded`);
+                    },
+                    (error) => {
+                        console.error(`Error loading ${piece.mtl}:`, error);
+                        loadingErrors.push(`材质加载错误 ${piece.mtl}: ${error.message}`);
+                        updateLoadingProgress();
+                    }
+                );
+            });
+        }
+
+        function init() {
+        try {
+            console.log('初始化场景');
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x333333);
+
+            camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.set(0, 5, 10);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            document.body.appendChild(renderer.domElement);
+
+            controls = new OrbitControls(camera, renderer.domElement);
+
+            // 初始化标签渲染器
+            labelRenderer = new CSS2DRenderer();
+            labelRenderer.setSize(window.innerWidth, window.innerHeight);
+            labelRenderer.domElement.style.position = 'absolute';
+            labelRenderer.domElement.style.top = '0px';
+            labelRenderer.domElement.style.pointerEvents = 'none';
+            document.body.appendChild(labelRenderer.domElement);
+
+            // 添加点击事件监听器
+            window.addEventListener('click', onMouseClick)
+
+            // 初始化射线追踪器和鼠标向量
+            raycaster = new THREE.Raycaster();
+            mouse = new THREE.Vector2();
+            
+            // 添加鼠标移动事件监听器
+            window.addEventListener('mousemove', onMouseMove);
+
+            // 调整控制器参数
+            controls.enableDamping = true;           // 启用阻尼效果
+            controls.dampingFactor = 0.05;          // 阻尼系数
+            controls.zoomSpeed = 0.5;               // 缩放速度
+            controls.minDistance = 1;               // 最小缩放距离
+            controls.maxDistance = 1000;             // 最大缩放距离
+            controls.rotateSpeed = 0.8;            // 旋转速度
+            controls.panSpeed = 0.8;               // 平移速度
+            controls.screenSpacePanning = true;    // 使用屏幕空间平移
+
+            // 设置水平旋转限制
+            controls.minAzimuthAngle = -Infinity;  // 水平方向最小角度（允许无限旋转）
+            controls.maxAzimuthAngle = Infinity;   // 水平方向最大角度（允许无限旋转）
+            
+            // 设置垂直旋转限制
+            controls.minPolarAngle = 0;            // 垂直方向最小角度（0表示正上方）
+            controls.maxPolarAngle = Math.PI * 0.85;  // 垂直方向最大角度（限制到接近但不完全到底部）
+
+            // 启用自动旋转（可选）
+            // controls.autoRotate = true;         // 启用自动旋转
+            // controls.autoRotateSpeed = 2.0;     // 自动旋转速度
+            window.addEventListener('click', onMouseClick);
+
+            addLights();
+            loadModels();
+            addClearLabelsButton();
+
+        } catch (error) {
+            info.textContent = '初始化错误: ' + error.message;
+            console.error('初始化错误:', error);
+        }
+    }
+
+        // 添加点击处理函数
+        function onMouseClick(event) {
+            if (event.ctrlKey) {
+                // 原有的添加标签功能
+                const intersects = raycaster.intersectObjects(scene.children);
+                if (intersects.length > 0) {
+                    const label = createLabel(intersects[0].point);
+                    scene.add(label);
+                }
+            } else {
+                // 新增的楼层模型加载功能
+                mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+                mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+                
+                raycaster.setFromCamera(mouse, camera);
+                const intersects = raycaster.intersectObjects(scene.children);
+                
+                if (intersects.length > 0) {
+                    const object = intersects[0].object;
+                    const info = buildingInfo.get(object.uuid);
+                    
+                    if (info && info.hasFloorModel) {
+                        loadFloorModel(info);
+                    }
+                }
+            }
+        }
+
+        // 创建标签的函数
+        function createLabel(position) {
+            const container = document.createElement('div');
+            container.className = 'label-container';
+            container.style.position = 'relative';
+            
+            // 坐标文本
+            const textDiv = document.createElement('div');
+            textDiv.textContent = `X: ${position.x.toFixed(2)}\nY: ${position.y.toFixed(2)}\nZ: ${position.z.toFixed(2)}`;
+            textDiv.style.color = 'white';
+            textDiv.style.backgroundColor = 'rgba(0,0,0,0.7)';
+            textDiv.style.padding = '5px 25px 5px 5px';
+            textDiv.style.borderRadius = '3px';
+            textDiv.style.fontSize = '12px';
+            textDiv.style.whiteSpace = 'pre-line';
+            textDiv.style.pointerEvents = 'auto'; // 允许鼠标事件
+            
+            // 删除按钮
+            const deleteButton = document.createElement('div');
+            deleteButton.textContent = '×';
+            deleteButton.style.position = 'absolute';
+            deleteButton.style.right = '5px';
+            deleteButton.style.top = '50%';
+            deleteButton.style.transform = 'translateY(-50%)';
+            deleteButton.style.color = '#ff4444';
+            deleteButton.style.cursor = 'pointer';
+            deleteButton.style.fontSize = '14px';
+            deleteButton.style.fontWeight = 'bold';
+            deleteButton.style.padding = '0 5px';
+            deleteButton.style.pointerEvents = 'auto'; // 允许鼠标事件
+            
+            // 添加悬停效果
+            deleteButton.onmouseover = () => {
+                deleteButton.style.color = '#ff0000';
+                deleteButton.style.transform = 'translateY(-50%) scale(1.2)';
+                deleteButton.style.transition = 'all 0.2s';
+            };
+            
+            deleteButton.onmouseout = () => {
+                deleteButton.style.color = '#ff4444';
+                deleteButton.style.transform = 'translateY(-50%) scale(1.0)';
+            };
+            
+            // 修改删除功能
+            deleteButton.onclick = (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                const label = container.labelObject;
+                if (label && label.parent) {
+                    label.parent.remove(label);
+                    labels = labels.filter(l => l !== label);
+                    console.log('标签已删除', labels.length);
+                }
+            };
+            
+            container.appendChild(textDiv);
+            container.appendChild(deleteButton);
+            
+            // 创建标签对象
+            const label = new CSS2DObject(container);
+            label.position.copy(position);
+            container.labelObject = label;
+            
+            // 添加到标签数组
+            labels.push(label);
+            
+            return label;
+        }
+
+        // 添加清除所有标签的按钮
+        function addClearLabelsButton() {
+            const button = document.createElement('button');
+            button.textContent = '清除所有标签';
+            button.style.position = 'fixed';
+            button.style.bottom = '20px';
+            button.style.right = '20px';
+            button.style.padding = '8px 16px';
+            button.style.backgroundColor = 'rgba(255, 68, 68, 0.8)';
+            button.style.color = 'white';
+            button.style.border = 'none';
+            button.style.borderRadius = '4px';
+            button.style.cursor = 'pointer';
+            button.style.fontSize = '14px';
+            
+            button.onmouseover = () => {
+                button.style.backgroundColor = 'rgba(255, 68, 68, 1)';
+            };
+            
+            button.onmouseout = () => {
+                button.style.backgroundColor = 'rgba(255, 68, 68, 0.8)';
+            };
+            
+            button.onclick = clearAllLabels;
+            
+            document.body.appendChild(button);
+        }
+
+        // 清除所有标签的函数
+        function clearAllLabels() {
+            labels.forEach(label => {
+                scene.remove(label);
+            });
+            labels = [];
+        }
+
+        // 添加建筑物标记函数
+        function addBuildingMarker(coordinates, name) {
+            // 创建顶点数组
+            const vertices = coordinates.flatMap(coord => [coord.x, coord.y, coord.z]);
+            const geometry = new THREE.BufferGeometry();
+            geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));  // 修正这里
+            
+            // 创建边框材质
+            const material = new THREE.LineBasicMaterial({
+                color: 0x00ff00,  // 绿色
+                transparent: true,
+                opacity: 0.5,
+                linewidth: 2
+            });
+
+            // 创建边框线条
+            const indices = [
+                0, 1, 1, 2, 2, 3, 3, 0,  // 底面
+                4, 5, 5, 6, 6, 7, 7, 4,  // 顶面
+                0, 4, 1, 5, 2, 6, 3, 7   // 连接线
+            ];
+            geometry.setIndex(indices);
+
+            // 创建线框对象
+            const box = new THREE.LineSegments(geometry, material);
+            box.name = `building-${name}`;
+            scene.add(box);
+
+            // 添加到建筑物信息
+            buildingInfo.set(box.uuid, {
+                name: name,
+                object: box,
+                originalColor: material.color.clone(),
+                originalOpacity: material.opacity
+            });
+
+            return box;
+        }
+
+        // 添加鼠标移动处理函数
+        function onMouseMove(event) {
+            mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = - (event.clientY / window.innerHeight) * 2 + 1;
+
+            raycaster.setFromCamera(mouse, camera);
+            const intersects = raycaster.intersectObjects(scene.children, true);
+
+            // 重置所有建筑物的样式
+            buildingInfo.forEach(info => {
+                info.object.material.color.copy(info.originalColor);
+                info.object.material.opacity = info.originalOpacity;
+                if (info.relatedParts) {
+                    info.relatedParts.forEach(part => {
+                        part.material.color.copy(info.originalColor);
+                        part.material.opacity = info.originalOpacity;
+                    });
+                }
+            });
+
+            if (intersects.length > 0) {
+                const object = intersects[0].object;
+                const info = buildingInfo.get(object.uuid);
+                
+                if (info) {
+                    // 高亮显示主体部分
+                    object.material.color.setHex(0xffff00);
+                    object.material.opacity = 1.0;
+                    
+                    // 高亮显示关联部分
+                    if (info.relatedParts) {
+                        info.relatedParts.forEach(part => {
+                            part.material.color.setHex(0xffff00);
+                            part.material.opacity = 1.0;
+                        });
+                    }
+                    
+                    // 显示名称标签
+                    showBuildingLabel(info.name, intersects[0].point);
+                } else {
+                    hideBuildingLabel();
+                }
+            } else {
+                hideBuildingLabel();
+            }
+        }
+
+        // 显示建筑物名称标签
+        function showBuildingLabel(name, position) {
+            if (!buildingLabel) {
+                buildingLabel = document.createElement('div');
+                buildingLabel.style.position = 'fixed';
+                buildingLabel.style.backgroundColor = 'rgba(0,0,0,0.8)';
+                buildingLabel.style.color = 'white';
+                buildingLabel.style.padding = '8px 12px';
+                buildingLabel.style.borderRadius = '4px';
+                buildingLabel.style.fontSize = '14px';
+                buildingLabel.style.pointerEvents = 'none';
+                buildingLabel.style.zIndex = '1000';
+                buildingLabel.style.transition = 'all 0.2s';
+                document.body.appendChild(buildingLabel);
+            }
+
+            buildingLabel.textContent = name;
+            buildingLabel.style.display = 'block';
+
+            // 将3D位置转换为屏幕坐标
+            const screenPosition = position.clone().project(camera);
+            const x = (screenPosition.x + 1) * window.innerWidth / 2;
+            const y = (-screenPosition.y + 1) * window.innerHeight / 2;
+            
+            buildingLabel.style.left = `${x}px`;
+            buildingLabel.style.top = `${y}px`;
+        }
+
+        // 隐藏建筑物标签
+        function hideBuildingLabel() {
+            if (buildingLabel) {
+                buildingLabel.style.display = 'none';
+            }
+        }
+
+        // 加载楼层模型函数
+        function loadFloorModel(info) {
+            // 保存当前场景状态
+            const currentScene = scene.clone();
+            const currentCamera = camera.clone();
+            const currentBuildingInfo = new Map(buildingInfo);  // 添加这行，保存当前的建筑信息
+            
+            // 清空场景
+            while(scene.children.length > 0) { 
+                scene.remove(scene.children[0]); 
+            }
+            
+            // 显示加载提示
+            loading.style.display = 'block';
+            loading.textContent = '加载楼层模型中...';
+
+            // 先加载材质
+            const mtlLoader = new MTLLoader();
+            mtlLoader.setPath('');  // 设置材质文件路径
+            
+            mtlLoader.load(
+                info.floorMaterialPath,
+                (materials) => {
+                    materials.preload();
+                    
+                    // 加载OBJ模型
+                    const objLoader = new OBJLoader();
+                    objLoader.setMaterials(materials);
+                    objLoader.setPath('');
+                    
+                    objLoader.load(
+                        info.floorModelPath,
+                        (object) => {
+                            scene.add(object);
+                            
+                            // 添加灯光
+                            scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+                            scene.add(new THREE.DirectionalLight(0xffffff, 0.8));
+                            
+                            // 如果需要添加子模型区域，在这里添加
+                            if (info.subModels) {
+                                info.subModels.forEach(subModel => {
+                                    const subBox = addModelMarker(subModel.coords, subModel.name);
+                                    buildingInfo.set(subBox.uuid, {
+                                        name: subModel.name,
+                                        object: subBox,
+                                        originalColor: subBox.material.color.clone(),
+                                        originalOpacity: subBox.material.opacity,
+                                        hasFloorModel: true,
+                                        floorModelPath: subModel.modelPath,
+                                        floorMaterialPath: subModel.materialPath,
+                                        isSubModel: true  // 标记这是子模型
+                                    });
+                                });
+                            }
+
+                            // 调整模型位置和相机
+                            const box = new THREE.Box3().setFromObject(object);
+                            const center = box.getCenter(new THREE.Vector3());
+                            const size = box.getSize(new THREE.Vector3());
+                            
+                            object.position.sub(center);  // 居中模型
+                            
+                            // 调整相机位置以适应模型大小
+                            camera.position.set(size.x, size.y, size.z * 2);
+                            camera.lookAt(0, 0, 0);
+                            controls.target.set(0, 0, 0);
+                            controls.update();
+                            
+                            loading.style.display = 'none';
+                            info.textContent = '楼层模型\n使用鼠标操作：\n- 左键：旋转\n- 右键：平移\n- 滚轮：缩放';
+                            
+                            // 添加返回按钮
+                            addBackButton(() => {
+                                // 清空当前场景
+                                while(scene.children.length > 0) { 
+                                    scene.remove(scene.children[0]); 
+                                }
+                                
+                                // 恢复原场景
+                                scene.copy(currentScene);
+                                camera.copy(currentCamera);
+                                buildingInfo = new Map(currentBuildingInfo);  // 添加这行，恢复建筑信息
+                                
+                                // 重新初始化所有对象的材质和交互属性
+                                scene.traverse((object) => {
+                                    const info = buildingInfo.get(object.uuid);
+                                    if (info) {
+                                        if (object.material) {
+                                            object.material.transparent = true;
+                                            object.material.opacity = info.originalOpacity;
+                                            object.material.color.copy(info.originalColor);
+                                            object.material.needsUpdate = true;
+                                        }
+                                    }
+                                });
+                                
+                                controls.target.set(0, 0, 0);
+                                controls.update();
+                                
+                                info.textContent = '楼层模型\n使用鼠标操作：\n- 左键：旋转\n- 右键：平移\n- 滚轮：缩放';
+                            });
+                        },
+                        (xhr) => {
+                            loading.textContent = `加载楼层模型中... ${Math.round(xhr.loaded / xhr.total * 100)}%`;
+                        },
+                        (error) => {
+                            console.error('加载模型失败:', error);
+                            loading.textContent = '加载模型失败';
+                            setTimeout(() => {
+                                loading.style.display = 'none';
+                            }, 2000);
+                        }
+                    );
+                },
+                undefined,
+                (error) => {
+                    console.error('加载材质失败:', error);
+                    loading.textContent = '加载材质失败';
+                    setTimeout(() => {
+                        loading.style.display = 'none';
+                    }, 2000);
+                }
+            );
+        }
+
+        // 添加返回按钮函数
+        function addBackButton(onBack) {
+            const button = document.createElement('button');
+            button.textContent = '返回主场景';
+            button.style.cssText = `
+                position: fixed;
+                top: 20px;
+                right: 20px;
+                padding: 8px 16px;
+                background-color: rgba(0, 0, 0, 0.8);
+                color: white;
+                border: none;
+                border-radius: 4px;
+                cursor: pointer;
+                font-size: 14px;
+                z-index: 1000;
+            `;
+            
+            button.onmouseover = () => {
+                button.style.backgroundColor = 'rgba(0, 0, 0, 1)';
+            };
+            
+            button.onmouseout = () => {
+                button.style.backgroundColor = 'rgba(0, 0, 0, 0.8)';
+            };
+            
+            button.onclick = () => {
+                onBack();
+                button.remove();
+            };
+            
+            document.body.appendChild(button);
+        }
+
+        // 添加模型标记的辅助函数
+        function addModelMarker(coords, name) {
+            const vertices = coords.flatMap(coord => [coord.x, coord.y, coord.z]);
+            const geometry = new THREE.BufferGeometry();
+            geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+            
+            const material = new THREE.LineBasicMaterial({
+                color: 0x00ff00,
+                transparent: true,
+                opacity: 0.5,
+                linewidth: 2
+            });
+
+            const indices = [
+                0, 1, 1, 2, 2, 3, 3, 0,  // 底面
+                4, 5, 5, 6, 6, 7, 7, 4,  // 顶面
+                0, 4, 1, 5, 2, 6, 3, 7   // 连接线
+            ];
+            geometry.setIndex(indices);
+
+            const box = new THREE.LineSegments(geometry, material);
+            box.name = `submodel-${name}`;
+            scene.add(box);
+            return box;
+        }
+
+        // 添加一个函数来重新初始化场景中的所有交互
+        function reinitializeSceneInteractions(scene) {
+            scene.traverse((object) => {
+                const info = buildingInfo.get(object.uuid);
+                if (info) {
+                    // 重新设置材质属性
+                    if (object.material) {
+                        object.material.transparent = true;
+                        object.material.opacity = info.originalOpacity;
+                        object.material.color.copy(info.originalColor);
+                        object.material.needsUpdate = true;
+                    }
+
+                    // 重新设置交互标志
+                    object.userData.isInteractive = true;
+
+                    // 如果有关联部分，也重新初始化它们
+                    if (info.relatedParts) {
+                        info.relatedParts.forEach(part => {
+                            if (part.material) {
+                                part.material.transparent = true;
+                                part.material.opacity = info.originalOpacity;
+                                part.material.needsUpdate = true;
+                            }
+                            part.userData.isInteractive = true;
+                        });
+                    }
+
+                    // 如果有子模型信息，确保它们也被正确设置
+                    if (info.subModels) {
+                        info.subModels.forEach(subModel => {
+                            const subObject = scene.getObjectByName(`submodel-${subModel.name}`);
+                            if (subObject) {
+                                subObject.userData.isInteractive = true;
+                                if (subObject.material) {
+                                    subObject.material.transparent = true;
+                                    subObject.material.opacity = 0.5;
+                                    subObject.material.needsUpdate = true;
+                                }
+                            }
+                        });
+                    }
+                }
+            });
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update();
+            renderer.render(scene, camera);
+            labelRenderer.render(scene, camera);
+        }
+
+        window.addEventListener('resize', function() {
+            if (camera && renderer && labelRenderer) {
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+                labelRenderer.setSize(window.innerWidth, window.innerHeight);
+            }
+        });
+
+        // 启动应用
+        init();
+        animate();
+    </script>
+</body>
+</html>
